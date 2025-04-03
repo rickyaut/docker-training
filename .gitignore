@@ -1,0 +1,4 @@
+**/data
+target
+spark/spark-local-dir
+src/main/python/.venv

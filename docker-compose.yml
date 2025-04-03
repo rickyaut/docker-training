@@ -1,0 +1,215 @@
+services:
+  # Neo4j Service
+  neo4j:
+    image: neo4j:5.26.5
+    environment:
+      - TZ=Australia/Melbourne
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}  # username/password for Neo4j
+    container_name: neo4j
+    ports:
+      - "7474:7474"  # HTTP port for Neo4j Browser
+      - "7687:7687"  # Bolt protocol port for communication
+    volumes:
+      - ./neo4j/data:/data
+    networks:
+      - mynetwork
+
+  # # Zookeeper for Kafka
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    container_name: zookeeper
+    environment:
+      - TZ=Australia/Melbourne
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+    ports:
+      - "2181:2181"
+    networks:
+      - mynetwork
+
+  # # Kafka Broker
+  kafka:
+    image: wurstmeister/kafka:latest
+    container_name: kafka
+    environment:
+      - TZ=Australia/Melbourne
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9093
+      - KAFKA_LISTENER_SECURITY_PROTOCOL=PLAINTEXT
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      # - KAFKA_LISTENER_NAME=PLAINTEXT
+      # - KAFKA_LISTENER_PORT=9093
+      # - KAFKA_LISTENER_NAME_INTERNAL=INTERNAL
+    ports:
+      - "9093:9093"  # Kafka port
+    volumes:
+      - ./kafka/data:/var/lib/kafka/data  # Persist Kafka data
+    depends_on:
+      - zookeeper
+    networks:
+      - mynetwork
+    expose:
+      - "9093"
+  
+  # Tensorflow jupyter
+  tensorflow:
+    image: tensorflow/tensorflow:latest-jupyter
+    container_name: tensorflow
+    environment:
+      - TZ=Australia/Melbourne
+      - JUPYTER_TOKEN=easy
+      - DEEPSEEK_APIKEY=${DEEPSEEK_APIKEY}
+    volumes:
+      - ./jupyter/tensorflow:/tf/tensorflow-jupyter
+    ports:
+      - "8888:8888"
+    networks:
+      - mynetwork
+
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    environment:
+      - TZ=Australia/Melbourne
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+      - POSTGRES_DB=metastore
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/data:/var/lib/postgresql/data
+    networks:
+      - mynetwork
+
+  hive-metastore:
+    image: apache/hive:4.0.1
+    container_name: hive-metastore
+    depends_on:
+      - postgres
+    environment:
+      TZ: Australia/Melbourne
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+    volumes:
+      - ~/.m2/repository/org/postgresql/postgresql/42.7.0/postgresql-42.7.0.jar:/opt/hive/lib/postgres.jar
+    ports:
+      - "9083:9083"
+    networks:
+      - mynetwork
+
+  hive-server:
+    image: apache/hive:4.0.1
+    container_name: hive-server
+    depends_on:
+      - hive-metastore
+    environment:
+      TZ: Australia/Melbourne
+      SERVICE_NAME: hiveserver2
+      DB_DRIVER: postgres
+      IS_RESUME: true
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+        -Dhive.metastore.uris=thrift://hive-metastore:9083
+    volumes:
+      - ~/.m2/repository/org/postgresql/postgresql/42.7.0/postgresql-42.7.0.jar:/opt/hive/lib/postgres.jar
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    networks:
+      - mynetwork
+
+  hadoop-namenode:
+    image: bde2020/hadoop-namenode:latest
+    container_name: hadoop-namenode
+    environment:
+      - TZ=Australia/Melbourne
+      - CLUSTER_NAME=testcluster
+      - HDFS_NAMENODE_USER=root
+    volumes:
+      - ./hadoop/conf/core-site.xml:/etc/hadoop/core-site.xml
+      - ./hadoop/namenode/data:/hadoop/dfs/name
+    ports:
+      - 9870:9870
+    networks:
+      - mynetwork
+
+  # Hadoop HDFS DataNode
+  hadoop-datanode:
+    image: bde2020/hadoop-datanode:latest
+    container_name: hadoop-datanode
+    environment:
+      - TZ=Australia/Melbourne
+      - CLUSTER_NAME=testcluster
+    depends_on:
+      - hadoop-namenode
+    volumes:
+      - ./hadoop/conf/core-site.xml:/etc/hadoop/core-site.xml
+      - ./hadoop/datanode/data:/hadoop/dfs/data
+    ports:
+      - 9864:9864
+    networks:
+      - mynetwork
+
+  spark-master:
+    image: apache/spark:3.5.5
+    container_name: spark-master
+    environment:
+      - TZ=Australia/Melbourne
+      - SPARK_MASTER_PORT=7077
+      - SPARK_LOCAL_DIRS=/tmp/spark-local-dir
+      - PYSPARK_DRIVER_PYTHON=python3
+    ports:
+      - "7077:7077"  # Spark master port
+      - "8080:8080"  # Spark web UI
+    volumes:
+      - ./spark/conf/core-site.xml:/opt/spark/conf/core-site.xml
+      - ./spark/conf/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
+      - ./spark/master/data:/opt/spark/data  # Updated path
+      - ./src:/opt/spark/workspace
+      - ./spark/spark-local-dir:/tmp/spark-local-dir
+    networks:
+      - mynetwork
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+  
+  spark-worker:
+    image: apache/spark:3.5.5
+    container_name: spark-worker
+    environment:
+      - TZ=Australia/Melbourne
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_MASTER=spark://spark-master:7077
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"  # Spark worker web UI
+    volumes:
+      - ./spark/worker/data:/opt/spark/data  # Updated path
+      - ./src:/opt/spark/workspace
+      - ./spark/conf/core-site.xml:/opt/spark/conf/core-site.xml
+      - ./spark/conf/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
+    networks:
+      - mynetwork
+    restart: always  # Restart the container if it crashes or exits
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+
+  frooodle-s-pdf:
+    image: frooodle/s-pdf:latest
+    container_name: frooodle-s-pdf
+    ports:
+      - "9180:8080"
+    networks:
+      - mynetwork
+
+networks:
+  mynetwork:
+    driver: bridge
